@@ -1,0 +1,283 @@
+For this workshop. We need you to deploy NGINX for load balance and reverse proxy
+================================================================================
+Part1: Reverse Proxy by DNS
+================================================================================
+1. Pull image nginx with command: 			"docker image pull labdocker/nginx:labnetworkhttp2"
+2. Pull image nodejs (web1) with command:	"docker image pull labdocker/alpineweb:web1"
+3. Pull image nodejs (web2) with command:	"docker image pull labdocker/alpineweb:web2"
+4. Create Public Network with command:
+	docker network create --driver bridge \
+--subnet=192.168.100.0/24 --ip-range=192.168.100.128/25 \
+--gateway=192.168.100.5 --opt="com.docker.network.mtu"="1500" webpublic
+
+	docker network create --driver bridge \
+--subnet=192.168.101.0/24 --ip-range=192.168.101.128/25 \
+--gateway=192.168.101.5 --opt="com.docker.network.mtu"="9000" webinternal
+
+5. Run container web1 & web2 with command:
+	docker container run -dt --name web1 --net webinternal --net-alias web1 labdocker/alpineweb:web1 node hello.js
+	docker container run -dt --name web2 --net webinternal --net-alias web2 labdocker/alpineweb:web2 node hello.js
+
+6. Run container nginx and attach network 
+	docker container run -dt --name nginx --net webinternal -p 80:8080 -p 443:8443 labdocker/nginx:labnetworkhttp2
+	docker network connect webpublic nginx
+
+7. Open url: 
+			curl http://ifconfig.co
+			http://<public ip>/nodejs
+			https://<public ip>/nodejs
+
+	* from command line: 
+			curl http://<public ip>/nodejs -v
+			curl https://<public ip>/nodejs -v -k 
+
+8. Shell to nginx and test curl to nodejs with command below:
+	docker container exec -it nginx sh
+	curl http://web1:3000
+	curl http://web1:3000 -I
+	curl http://web2:3000
+	curl http://web2:3000 -I
+
+9. Stop and remove nginx load balance by command:
+	docker container stop nginx && docker container rm nginx
+
+10. Start Kong api gateway by command:
+	10.1 Prepare space for kong apigateway by command:
+	mkdir ~/kong
+  mkdir ~/kong/postgres
+  mkdir ~/kong/kong-configuration
+
+	10.2 Create database by command:
+	docker image pull postgres:9.6
+	docker container run -dt --name kong-database \
+    --network=webinternal -p 5432:5432 \
+    --mount type=bind,source=/home/ubuntu/kong/postgres,target=/var/lib/postgresql/data \
+    -e "POSTGRES_USER=kong" -e "POSTGRES_DB=kong" \
+    postgres:9.6
+
+	10.3 Initial database for kong by command:
+	docker image pull kong:1.2.1
+	docker container run --rm \
+     --network=webinternal \
+     -e "KONG_DATABASE=postgres" \
+     -e "KONG_PG_HOST=kong-database" \
+     kong:1.2.1 kong migrations bootstrap
+
+	10.4 Run kon api gateway by command:
+	docker container run -d --name kong \
+     --network=webinternal \
+     -e "KONG_DATABASE=postgres" \
+     -e "KONG_PG_HOST=kong-database" \
+     -e "KONG_PROXY_ACCESS_LOG=/dev/stdout" \
+     -e "KONG_ADMIN_ACCESS_LOG=/dev/stdout" \
+     -e "KONG_PROXY_ERROR_LOG=/dev/stderr" \
+     -e "KONG_ADMIN_ERROR_LOG=/dev/stderr" \
+     -e "KONG_ADMIN_LISTEN=0.0.0.0:8001, 0.0.0.0:8444 ssl" \
+     -p 80:8000 \
+     -p 443:8443 \
+     -p 8001:8001 \
+     -p 8444:8444 \
+     kong:1.2.1
+
+	*Remark: 
+	:8000 on which Kong listens for incoming HTTP traffic from your clients, and forwards it to your upstream services.
+	:8443 on which Kong listens for incoming HTTPS traffic. This port has a similar behavior as the :8000 port, except that it expects HTTPS traffic only. This port can be disabled via the configuration file.
+	:8001 on which the Admin API used to configure Kong listens.
+	:8444 on which the Admin API listens for HTTPS traffic.
+
+	10.5 Install Konga GUI by command:
+    docker image pull pantsel/konga:next
+    docker container run -dt -p 1337:1337 \
+	--network=webinternal --name konga \
+    -e "NODE_ENV=production" -e "TOKEN_SECRET=0pc@ll@nt" \
+    pantsel/konga:next
+
+	10.6 Install PGAdmin by command:
+	docker image pull dpage/pgadmin4:4.11
+  docker container run -p 8080:80 --name pgadmin \
+	--network=webinternal -e "PGADMIN_DEFAULT_EMAIL=kong@localdomain.com" \
+    -e "PGADMIN_DEFAULT_PASSWORD=kong" -d dpage/pgadmin4:4.11
+
+	10.7 (local) Test open GUI:
+	http://<public ip>:8080		==> PGAdmin (Email Address: kong@localdomain.com, Password: kong) ==> Add Server: <private ip>, username: kong, password:kong
+	http://<public ip>:1337		==> Konga (Username: kongadmin, Email Address: kong@localdomain.com, Password: P@ssw0rd) ==> Connect Kong: Name KONG, Kong Admin URL: http://<private ip>:8001
+	
+	10.8 Test kong api (cli):
+	curl http://localhost:8001
+
+11 Create upstream server for load balance between web1, web2 by command:
+curl -i -X POST \
+  --url http://localhost:8001/upstreams/ \
+  --data 'name=upstream-webtestthailand' \
+  --data 'hash_on=none' \
+  --data 'hash_fallback=none' \
+  --data 'slots=100' \
+  --data 'healthchecks.active.http_path=/' \
+  --data 'healthchecks.active.timeout=1' \
+  --data 'healthchecks.active.healthy.interval=5' \
+  --data 'healthchecks.active.type=http'
+
+  curl -i -X POST \
+  --url http://localhost:8001/upstreams/upstream-webtestthailand/targets \
+  --data 'target=web1:3000' \
+  --data 'weight=100'
+
+  curl -i -X POST \
+  --url http://localhost:8001/upstreams/upstream-webtestthailand/targets \
+  --data 'target=web2:3000' \
+  --data 'weight=100'
+
+12 Create service for receive request and set to upstream by command:
+curl -i -X POST \
+  --url http://localhost:8001/services/ \
+  --data 'name=service-webtestthailand' \
+  --data 'retries=5' \
+  --data 'protocol=http' \
+  --data 'host=upstream-webtestthailand' \
+  --data 'port=80' \
+  --data 'path=/'
+
+13. Create route for accept traffic from outside ("webtestthailand.com") to service by command:
+curl -i -X POST \
+  --url http://localhost:8001/services/service-webtestthailand/routes \
+  --data 'name=route-webtestthailand' \
+  --data 'hosts[]=webtestthailand.com' \
+  --data 'protocols=https' \
+  --data 'paths=/nodejs' \
+  --data 'strip_path=true'
+
+14.(local) Add hosts for call "webtestthailand.com"
+	For Windows:
+		<public ip> webtestthailand.com
+
+	For Mac:
+	echo "<public ip> webtestthailand.com" | sudo tee -a /private/etc/hosts
+
+15. Open curl for test
+	curl -i -X GET \
+  --url https://<public ip/private ip>/nodejs --header 'Host: webtestthailand.com' -k
+
+	Or: browser: https://webtestthailand.com/nodejs
+
+16. Enable authentication via api-key by command:
+	curl -i -X POST \
+  --url http://localhost:8001/services/service-webtestthailand/plugins/ \
+  --data 'name=key-auth'
+
+	curl -i -X POST \
+  --url http://localhost:8001/consumers/ \
+  --data "username=public1"
+
+	curl -i -X POST \
+  --url http://localhost:8001/consumers/public1/key-auth/ \
+  --data 'key=thisisfirsttestapikeypublic112345678'
+
+17. Test curl again with and without api-key:
+
+	Without API-Key:
+	curl -i -X GET \
+  --url https://<public ip/private ip>/nodejs --header 'Host: webtestthailand.com' -k
+
+	With API-Key:
+	curl -i -X GET \
+  --url https://<public ip/private ip>/nodejs --header 'Host: webtestthailand.com' --header "apikey: thisisfirsttestapikeypublic112345678" -k
+
+18. Clean up container with command:
+	docker container stop web1 web2 konga kong kong-database pgadmin
+	docker container rm web1 web2 konga kong kong-database pgadmin
+	docker network rm webpublic webinternal
+	sudo rm -rf ~/kong
+
+================================================================================
+DEMO: Reverse Proxy by DNS with MACVLAN (DEMO from Instructor)
+Note: If you need to join this lab. You need to install docker-machine over oracle virtualbox on MAC OS X
+================================================================================
+1. Pull image nginx with command: 		
+	"docker image pull labdocker/nginx:labnetworkhttp2"
+
+2. Check and Locate Network Card by command:
+	ifconfig / ip addr
+
+	Example: dockertoolbox (labdocker: eth1): Gateway: 192.168.99.1
+	----------------------------------------------------------------------------------------
+	docker@labdocker:~$ ip addr
+	----------------------------------------------------------------------------------------
+docker0   Link encap:Ethernet  HWaddr 02:42:45:01:0E:F9  
+          inet addr:172.17.0.1  Bcast:172.17.255.255  Mask:255.255.0.0
+          UP BROADCAST MULTICAST  MTU:1500  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0 
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+
+eth0      Link encap:Ethernet  HWaddr 08:00:27:6F:12:9D  
+          inet addr:10.0.2.15  Bcast:10.0.2.255  Mask:255.255.255.0
+          inet6 addr: fe80::a00:27ff:fe6f:129d/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:299 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:221 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000 
+          RX bytes:41629 (40.6 KiB)  TX bytes:40838 (39.8 KiB)
+
+eth1      Link encap:Ethernet  HWaddr 08:00:27:39:C9:62  
+          inet addr:192.168.99.100  Bcast:192.168.99.255  Mask:255.255.255.0
+          inet6 addr: fe80::a00:27ff:fe39:c962/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:2 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:12 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000 
+          RX bytes:1180 (1.1 KiB)  TX bytes:1485 (1.4 KiB)
+
+lo        Link encap:Local Loopback  
+          inet addr:127.0.0.1  Mask:255.0.0.0
+          inet6 addr: ::1/128 Scope:Host
+          UP LOOPBACK RUNNING  MTU:65536  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000 
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+	---------------------------------------------------------------------------------------------
+
+3. Create Network for MACVLAN by command: (This example: will extract 192.168.99.193 - 192.168.99.206 for macvlan)
+	docker network create -d macvlan --subnet=192.168.99.0/24 --ip-range=192.168.99.192/28 --gateway=192.168.99.1 -o parent=eth1 macvlanlab
+
+4. Run container for web1, web2 and nginx by command:
+	docker container run -dt --name web1 --net macvlanlab --ip 192.168.99.193 --net-alias web1  labdocker/alpineweb:web1 node hello.js
+	
+	docker container run -dt --name web2 --net macvlanlab --ip 192.168.99.194 --net-alias web2 labdocker/alpineweb:web2 node hello.js
+
+	docker container run -dt --name nginx --net macvlanlab --ip 192.168.99.195 --net-alias nginx labdocker/nginx:labnetworkhttp2
+
+4. On virtualbox: Set Property of Network Card for promiscuous mode
+and configure nic card for promiscuous mode via command:
+	sudo ip link set dev eth1 promisc on
+
+5. Test internal container connection by command:
+	docker container exec -it nginx curl http://web1:3000
+	docker container exec -it nginx curl http://web1:3000 -I
+	docker container exec -it nginx curl http://web2:3000
+	docker container exec -it nginx curl http://web2:3000 -I
+	docker container exec -it nginx ping web1
+	docker container exec -it nginx ping web2
+
+6. Test connect from outside by command: (Operate on teacher macbook)
+	ping 192.168.99.193
+	ping 192.168.99.194
+	ping 192.168.99.195
+	curl http://192.168.99.193:3000 -v
+	curl http://192.168.99.194:3000 -v
+	curl http://192.168.99.195:8080 -v
+	curl https://192.168.99.195:8443 -v -k
+
+7. Test open url for access by command:
+	http://192.168.99.195:8080/					==> via NGINX
+	http://192.168.99.195:8080/nodejs			==> via NGINX
+	https://192.168.99.195:8443					==> via NGINX
+	https://192.168.99.195:8443/nodejs			==> via NGINX
+	http://192.168.99.193:3000/					==> Native NODEJS1
+	http://192.168.99.194:3000/					==> Native NODEJS2
+
+9. Clean Up Lab by command:
+	docker container stop nginx web1 web2
+	docker container rm nginx web1 web2
+	docker network rm macvlanlab
