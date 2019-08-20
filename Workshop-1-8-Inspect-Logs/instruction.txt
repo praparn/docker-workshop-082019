@@ -2,7 +2,7 @@ For this workshop. We will demonstration how to check log / configuration of con
 =============================================================================================
 Part 1: Setup daemon.json for log rotate on docker daemon
 1. Copy daemon.json to /etc/docker by command:
-sudo cp ~/docker-workshop-072019/Workshop-1-8-Inspect-Logs/daemon.json /etc/docker/
+sudo cp ~/docker-workshop-082019/Workshop-1-8-Inspect-Logs/daemon.json /etc/docker/
 
 2. Reload docker daemon by command:
 sudo systemctl daemon-reload
