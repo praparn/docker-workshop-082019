@@ -253,8 +253,6 @@ Remove Manager / Worker from Swarm Cluster
 2. (worker2) Leave from swarm cluster by command: docker swarm leave
 
 3. (worker1, master) Check node status of “labdocker” by command: docker node ls
-
-4. (worker2) After node status “Down” we can remove node by command: 
 	docker node rm <worker2 hostname>
 	docker node ls
 
